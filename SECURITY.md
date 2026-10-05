@@ -10,12 +10,11 @@ Security fixes are handled on a best-effort basis by the maintainers.
 **Do not post sensitive vulnerability details in public issues or discussions
 before a fix is available.**
 
-Report vulnerabilities privately to the project maintainers. No private
-security email address has been established yet; this is a pre-publication
-item that the project owner must configure before general publication. Until a
-private channel exists, contact the maintainers through the project's issue
-tracker and clearly mark the report as security-related, keeping exploit
-details out of the public body.
+Report vulnerabilities privately through GitHub Private Vulnerability
+Reporting for this repository
+(`https://github.com/drunkleen/archwarts/security/advisories/new`). Do not
+post sensitive exploit details in public issues or discussions before a fix is
+available.
 
 A useful report should contain:
 
