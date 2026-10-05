@@ -1,0 +1,26 @@
+# Recovery and filesystem-specific support
+linux-lts
+linux-lts-headers
+snapper
+
+# Creative and media applications
+kdenlive
+moonlight-qt
+xournalpp
+
+# Communication
+discord
+signal-desktop
+telegram-desktop
+
+# Gaming
+steam
+
+# Optional services
+tailscale
+
+# Optional Dolphin capabilities
+kio-admin
+kio-gdrive
+kdenetwork-filesharing
+konsole

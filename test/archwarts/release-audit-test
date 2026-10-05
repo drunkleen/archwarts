@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+out=$("$root/bin/archwarts" release-audit 2>&1 || true)
+
+for check in \
+  'provenance file present: LICENSE' \
+  'LICENSE preserves Omarchy and claims Archwarts work' \
+  'no todo/fixme/hack markers' \
+  'no development path references' \
+  'no VM/runtime artifacts in product tree' \
+  'no secret material in product' \
+  'no world-writable product files' \
+  'no user-visible Omarchy branding in shell' \
+  'product branded as Archwarts' \
+  'release tarball excludes inherited migration input' \
+  'release tarball excludes VM artifacts'; do
+  [[ $out == *"PASS	$check"* ]] || fail "release audit must pass: $check"
+done
+
+[[ $out == *'RELEASE CANDIDATE READY'* ]] || fail 'release audit must report candidate ready'
+
+printf 'PASS: Archwarts release-candidate audit\n'

@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+source "$root/lib/archwarts/packages.sh"
+declare -A groups=()
+declare -A source_exceptions=()
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+for manifest in core default optional remove; do
+  file=$root/packages/$manifest.packages
+  [[ -r $file ]] || fail "missing package manifest: $file"
+  unset seen
+  declare -A seen=()
+
+  while IFS= read -r line || [[ -n $line ]]; do
+    package=${line%%#*}
+    package=${package//[[:space:]]/}
+    [[ -n $package ]] || continue
+    [[ $package =~ ^[a-z0-9@._+-]+$ ]] || fail "invalid package name in $manifest: $package"
+    [[ -z ${seen[$package]:-} ]] || fail "duplicate package in $manifest: $package"
+    seen[$package]=1
+    groups[$manifest:$package]=1
+  done <"$file"
+done
+
+for package_key in "${!groups[@]}"; do
+  manifest=${package_key%%:*}
+  package=${package_key#*:}
+  for other in core default optional remove; do
+    [[ $other == "$manifest" ]] && continue
+    [[ -z ${groups[$other:$package]:-} ]] \
+      || fail "$package appears in both $manifest and $other"
+  done
+done
+
+while IFS=$'\t' read -r package source _reason; do
+  [[ $package == package ]] && continue
+  [[ $source == aur || $source == upstream ]] || fail "invalid package source for $package: $source"
+  [[ -z ${source_exceptions[$package]:-} ]] || fail "duplicate source exception: $package"
+  [[ -z ${groups[core:$package]:-} ]] || fail "core package must use official repositories: $package"
+  [[ -n ${groups[default:$package]:-} || -n ${groups[optional:$package]:-} ]] \
+    || fail "source exception is not in default or optional groups: $package"
+  source_exceptions[$package]=$source
+done <"$root/packages/sources.tsv"
+
+for package in chromium nautilus nautilus-python sushi 1password 1password-cli \
+  kdenlive discord signal-desktop steam telegram-desktop; do
+  [[ -z ${groups[core:$package]:-} ]] || fail "$package must not be core"
+  [[ -z ${groups[default:$package]:-} ]] || fail "$package must not be default"
+done
+
+for package in firefox dolphin hyprland quickshell; do
+  [[ -n ${groups[core:$package]:-} ]] || fail "$package must be core"
+done
+
+for package in kdenlive discord signal-desktop steam telegram-desktop; do
+  [[ -n ${groups[optional:$package]:-} ]] || fail "$package must be optional"
+done
+
+for package in bitwarden gimp libreoffice-fresh mpv docker docker-compose lazygit lazydocker; do
+  [[ -n ${groups[default:$package]:-} ]] || fail "$package must be default"
+done
+
+[[ ${source_exceptions[localsend]:-} == aur ]] || fail 'LocalSend must be explicitly AUR-sourced'
+
+# Every privileged systemd unit's package must be installable: an Archwarts
+# manifest entry or a base `systemd`-provided unit. The unit->package mapping
+# is explicit (unit names are not always the package name).
+declare -A unit_pkg=(
+  [NetworkManager]=networkmanager
+  [NetworkManager-wait-online]=networkmanager
+  [avahi-daemon]=avahi
+  [cups]=cups
+  [docker]=docker
+  [power-profiles-daemon]=power-profiles-daemon
+  [sddm]=sddm
+  [systemd-resolved]=systemd
+  [systemd-oomd]=systemd
+)
+while IFS=$'\t' read -r kind name _reason; do
+  [[ $kind == kind || $kind == \#* || -z $kind ]] && continue
+  [[ $kind == enable || $kind == mask ]] || continue
+  unit=${name%.service}
+  unit=${unit%.socket}
+  pkg=${unit_pkg[$unit]:-}
+  [[ -n $pkg ]] || fail "no package mapping for privileged unit $name"
+  [[ $pkg == systemd ]] && continue  # base package
+  [[ -n ${groups[core:$pkg]:-} || -n ${groups[default:$pkg]:-} \
+    || -n ${groups[optional:$pkg]:-} ]] \
+    || fail "privileged unit $name maps to package $pkg which is not in any manifest"
+done <"$root/install/privileged-actions.tsv"
+[[ -n ${groups[default:power-profiles-daemon]:-} ]] \
+  || fail 'power-profiles-daemon must be a default package (enabled by privileged actions)'
+
+for manifest in core default optional remove; do
+  archwarts_validate_package_manifest "$root" "$manifest" \
+    || fail "package library rejected $manifest"
+done
+
+minimal_plan=$(archwarts_package_plan "$root" minimal)
+[[ $minimal_plan == *firefox* ]] || fail 'minimal plan must contain Firefox'
+[[ $minimal_plan != *bitwarden* ]] || fail 'minimal plan must not contain Bitwarden'
+
+default_plan=$(archwarts_package_plan "$root" default)
+[[ $default_plan == *bitwarden* ]] || fail 'default plan must contain Bitwarden'
+[[ $default_plan == *gimp* ]] || fail 'default plan must contain GIMP'
+[[ $default_plan != *chromium* ]] || fail 'default plan must not contain Chromium'
+
+if archwarts_package_plan "$root" unknown >/dev/null 2>&1; then
+  fail 'unknown package profile unexpectedly succeeded'
+fi
+
+printf 'PASS: Archwarts package policy\n'

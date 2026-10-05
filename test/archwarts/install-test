@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+test_root=$(mktemp -d)
+trap 'rm -rf "$test_root"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+mkdir -p "$test_root/bin"
+cat >"$test_root/bin/pacman" <<'STUB'
+#!/usr/bin/env bash
+[[ $1 == -Q && ${3:-} == hyprland ]]
+STUB
+chmod +x "$test_root/bin/pacman"
+
+output=$(PATH="$test_root/bin:$PATH" "$root/bin/archwarts" install preflight minimal)
+[[ $output == *$'hyprland\tofficial\tinstalled'* ]] \
+  || fail 'preflight must report installed official packages'
+[[ $output == *$'firefox\tofficial\tmissing'* ]] \
+  || fail 'preflight must report missing official packages'
+[[ $output != *$'bitwarden\t'* ]] \
+  || fail 'minimal preflight must exclude default packages'
+
+output=$(PATH="$test_root/bin:$PATH" "$root/bin/archwarts" install preflight default)
+[[ $output == *$'localsend\taur\tmissing'* ]] \
+  || fail 'default preflight must report explicit AUR sources'
+
+if ARCHWARTS_PACMAN=missing-pacman-command \
+  "$root/bin/archwarts" install preflight minimal >/dev/null 2>&1; then
+  fail 'preflight unexpectedly succeeded without pacman'
+fi
+
+if "$root/bin/archwarts" install preflight unknown >/dev/null 2>&1; then
+  fail 'unknown install profile unexpectedly succeeded'
+fi
+
+if "$root/bin/archwarts" install apply >/dev/null 2>&1; then
+  fail 'unimplemented install action unexpectedly succeeded'
+fi
+
+printf 'PASS: Archwarts install preflight\n'

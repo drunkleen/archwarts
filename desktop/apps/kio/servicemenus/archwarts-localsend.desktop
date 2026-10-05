@@ -1,0 +1,12 @@
+# Dolphin service menu: send the selected files through LocalSend.
+# Requires the `localsend` package (AUR) on the session PATH.
+[Desktop Entry]
+Type=Service
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=all/allfiles;
+Actions=send
+
+[Desktop Action send]
+Name=Send with LocalSend
+Icon=send
+Exec=localsend send %F

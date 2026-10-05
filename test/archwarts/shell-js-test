@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+node "$root/test/archwarts/js/shell-js-test.js"

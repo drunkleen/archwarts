@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+test_root=$(mktemp -d)
+trap 'rm -rf "$test_root"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+export HOME="$test_root/home"
+export XDG_CONFIG_HOME="$test_root/config"
+export XDG_DATA_HOME="$test_root/data"
+export XDG_STATE_HOME="$test_root/state"
+export XDG_CACHE_HOME="$test_root/cache"
+export XDG_RUNTIME_DIR="$test_root/run"
+export ARCHWARTS_PACMAN=pacman
+for d in home config data state cache run; do mkdir -p "$test_root/$d"; done
+
+cli="$root/bin/archwarts"
+"$cli" install stage base >/dev/null
+"$cli" install stage desktop-core >/dev/null
+
+# Case-insensitive scan over staged runtime CODE: shell, hypr config, theme,
+# runtime CLI and libraries. Any inherited-runtime reference here is a failure.
+# Documentation (*.md) is scanned separately below as attribution/research.
+# audit.sh is diagnostic tooling whose omarchy mentions are detection patterns
+# and diagnostic text (classified separately below).
+refs=$(rg -i --glob '!*.md' --glob '!audit.sh' 'omarchy|OMARCHY_PATH|/usr/share/omarchy|/var/lib/omarchy' \
+  "$test_root/config/archwarts/shell" "$test_root/config/archwarts/hypr" \
+  "$test_root/config/archwarts/theme" \
+  "$test_root/data/archwarts/runtime/bin" "$test_root/data/archwarts/runtime/lib" \
+  "$test_root/data/archwarts/runtime/install" "$test_root/data/archwarts/runtime/stages" \
+  "$test_root/data/archwarts/runtime/desktop" \
+  "$test_root/home/.local/bin" 2>/dev/null || true)
+if [[ -n $refs ]]; then
+  printf 'Forbidden inherited-runtime references in staged desktop code:\n%s\n' "$refs" >&2
+  exit 1
+fi
+
+# audit.sh mentions omarchy only inside detection patterns or diagnostic text.
+audit_lines=$(rg -i 'omarchy' "$test_root/data/archwarts/runtime/lib/archwarts/audit.sh" || true)
+if [[ -n $audit_lines ]]; then
+  while IFS= read -r line; do
+    trimmed=${line//[[:space:]]/}
+    [[ $line == *'rg -'* || $line == *"printf '"* || $trimmed == \#* ]] \
+      || fail "audit.sh omarchy mention is not a detection/diagnostic line:\n$line"
+  done <<<"$audit_lines"
+fi
+
+# Documentation references are permitted only as attribution/research. Every
+# staged *.md occurrence must be confined to a README describing derivation.
+md_refs=$(rg -il 'omarchy' "$test_root/config/archwarts/shell" \
+  "$test_root/data/archwarts/runtime/desktop" 2>/dev/null || true)
+if [[ -n $md_refs ]]; then
+  while IFS= read -r file; do
+    [[ $(basename "$file") == README.md ]] \
+      || fail "inherited-runtime mention outside a README: $file"
+  done <<<"$md_refs"
+fi
+
+# The removal manifest intentionally names inherited packages that Archwarts
+# must not install. Classified as migration/removal policy: every token is a
+# literal package identifier, never a runtime path or command.
+remove="$test_root/data/archwarts/runtime/packages/remove.packages"
+while IFS= read -r line; do
+  token=${line%%#*}
+  token=${token//[[:space:]]/}
+  [[ -n $token ]] || continue
+  [[ $token =~ ^[a-z0-9@._+-]+$ ]] \
+    || fail "remove manifest must name only package identifiers: $token"
+done <"$remove"
+
+# The install manifests must not pull any inherited-identity package.
+for manifest in core default optional; do
+  if rg -qi '^#|omarchy|linux-omarchy' "$test_root/data/archwarts/runtime/packages/$manifest.packages" 2>/dev/null; then
+    # comments are allowed; package identifiers matching omarchy are not
+    pkg=$(rg -i 'omarchy' "$test_root/data/archwarts/runtime/packages/$manifest.packages" | rg -v '^\s*#' || true)
+    [[ -z $pkg ]] || fail "$manifest manifest must not list inherited packages:\n$pkg"
+  fi
+done
+
+# The staged runtime CLI must be self-contained: no source-tree dependency.
+runtime_cli="$test_root/data/archwarts/runtime/bin/archwarts"
+[[ -x $runtime_cli ]] || fail 'runtime CLI must be staged and executable'
+"$runtime_cli" version | rg -q '^0\.1\.0$' \
+  || fail 'runtime CLI must report the Archwarts version'
+shell_status=$("$runtime_cli" shell status)
+[[ $shell_status == *'shell	staged	'* ]] \
+  || fail 'runtime CLI must resolve the staged shell'
+
+# The staged shell entry, Hyprland config, and launcher reference only
+# Archwarts-owned paths (already asserted by stages-test); here we confirm the
+# runtime CLI paths resolve into the staged tree.
+paths=$("$runtime_cli" paths)
+[[ $paths == *"config=$test_root/config/archwarts"* ]] \
+  || fail 'runtime CLI must resolve the staged config home'
+[[ $paths == *"runtime=$test_root/data/archwarts"* ]] \
+  || fail 'runtime CLI must resolve the staged data home'
+
+printf 'PASS: Archwarts staged runtime independence\n'

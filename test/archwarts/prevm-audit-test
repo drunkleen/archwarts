@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+cli="$root/bin/archwarts"
+
+out=$("$cli" preflight-audit 2>&1 || true)
+
+for check in \
+  'no inherited repository/mirror/keyring/channel requirements' \
+  'no omarchy-* command dependencies in core code' \
+  'no inherited runtime path references in core code' \
+  'Firefox is the browser default' \
+  'Dolphin is the file-manager default' \
+  'Bitwarden password-manager integration present' \
+  'no Chromium/Nautilus/1Password dependencies' \
+  'installer stages (base, desktop-core) exist' \
+  'update execution is explicitly gated' \
+  'hardware planning is explicit and safe' \
+  'doctor is non-mutating and uninstall refuses modified files' \
+  'ownership manifest machinery present' \
+  'license and attribution notice present'; do
+  [[ $out == *"PASS	$check"* ]] || fail "audit must pass: $check"
+done
+
+[[ $out == *'== PRE-VM READINESS =='* ]] || fail 'audit must emit the readiness classification'
+[[ $out == *'READY'* ]] || fail 'audit must report READY'
+[[ $out == *'NEEDS VM VALIDATION'* ]] || fail 'audit must separate VM validation'
+[[ $out == *'DEFERRED'* ]] || fail 'audit must list deferred items'
+[[ $out == *'BLOCKERS'* || $out == *'READY'* ]] || fail 'audit must classify blockers'
+
+printf 'PASS: Archwarts pre-VM audit\n'

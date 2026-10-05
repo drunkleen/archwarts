@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+test_root=$(mktemp -d)
+trap 'rm -rf "$test_root"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+export HOME="$test_root/home"
+export XDG_CONFIG_HOME="$test_root/config"
+export XDG_DATA_HOME="$test_root/data"
+export XDG_STATE_HOME="$test_root/state"
+export XDG_CACHE_HOME="$test_root/cache"
+export XDG_RUNTIME_DIR="$test_root/run"
+for d in home config data state cache run; do mkdir -p "$test_root/$d"; done
+
+cli="$root/bin/archwarts"
+fixtures="$test_root/fixtures"
+mkdir -p "$fixtures"
+
+# DMI fixture: desktop chassis, generic vendor.
+dmi="$test_root/dmi"
+mkdir -p "$dmi"
+printf 'TestVendor\n' >"$dmi/sys_vendor"
+printf '3\n' >"$dmi/chassis_type"
+
+# sysfs fixture with no battery.
+sysfs="$test_root/sys"
+mkdir -p "$sysfs/class/power_supply"
+
+# lspci fixtures.
+cat >"$fixtures/lspci-nvidia" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '00:02.0 VGA compatible controller [0300]: NVIDIA Corporation GA106 [GeForce RTX 3060] [10de:2503]'
+printf '%s\n' '00:1f.3 Audio device [0403]: Intel Corporation Device [8086:51c8]'
+EOF
+
+cat >"$fixtures/lspci-amd" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '01:00.0 VGA compatible controller [0300]: Advanced Micro Devices, Inc. [AMD/ATI] Navi 23 [Radeon RX 6600] [1002:73ff]'
+printf '%s\n' '03:00.0 Network controller [0280]: Intel Corporation Wi-Fi 6 AX210 [8086:2725]'
+EOF
+
+cat >"$fixtures/lspci-t2" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '00:1f.3 Audio device [0403]: Intel Corporation Device [8086:51c8]'
+printf '%s\n' '02:00.0 USB controller [0c03]: Apple Inc. T2 Security Chip [106b:1801]'
+EOF
+
+cat >"$fixtures/lspci-intel" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '00:02.0 VGA compatible controller [0300]: Intel Corporation CoffeeLake-S GT2 [UHD Graphics 630] [8086:3e92]'
+EOF
+
+cat >"$fixtures/lsusb" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
+chmod +x "$fixtures/lspci-nvidia" "$fixtures/lspci-amd" "$fixtures/lspci-t2" "$fixtures/lspci-intel" "$fixtures/lsusb"
+
+hw_env=(ARCHWARTS_LSPCI="$fixtures/lspci-nvidia" ARCHWARTS_LSUSB="$fixtures/lsusb" ARCHWARTS_DMI_ROOT="$dmi" ARCHWARTS_SYS_ROOT="$sysfs")
+
+# NVIDIA desktop: plan selects the official open module and never the kernel.
+detection=$(env "${hw_env[@]}" "$cli" hardware detect)
+[[ $detection == *'gpu	nvidia'* ]] || fail 'detection must identify NVIDIA'
+plan=$(env "${hw_env[@]}" "$cli" hardware plan)
+[[ $plan == *$'nvidia-open-dkms\tofficial'* ]] || fail 'NVIDIA plan must select the official open module'
+[[ $plan == *'kernel-unchanged'* ]] || fail 'plan must never replace the kernel'
+[[ $plan == *'proprietary-driver'*deferred* ]] || fail 'closed NVIDIA driver must be deferred'
+[[ $plan != *'power-profiles-daemon'* ]] || fail 'desktop must not require power profiles'
+
+# AMD laptop: power profiles, standard mesa note.
+dmi_laptop="$test_root/dmi-laptop"
+mkdir -p "$dmi_laptop"
+printf 'Apple\n' >"$dmi_laptop/sys_vendor"
+printf '8\n' >"$dmi_laptop/chassis_type"
+battery_sys="$test_root/sys-battery"
+mkdir -p "$battery_sys/class/power_supply/BAT0"
+
+detection=$(ARCHWARTS_LSPCI="$fixtures/lspci-amd" ARCHWARTS_LSUSB="$fixtures/lsusb" ARCHWARTS_DMI_ROOT="$dmi_laptop" ARCHWARTS_SYS_ROOT="$battery_sys" "$cli" hardware detect)
+[[ $detection == *'gpu	amd'* ]] || fail 'detection must identify AMD'
+[[ $detection == *'laptop	yes'* ]] || fail 'detection must identify a laptop'
+[[ $detection == *'battery	yes'* ]] || fail 'detection must identify a battery'
+plan=$(ARCHWARTS_LSPCI="$fixtures/lspci-amd" ARCHWARTS_LSUSB="$fixtures/lsusb" ARCHWARTS_DMI_ROOT="$dmi_laptop" ARCHWARTS_SYS_ROOT="$battery_sys" "$cli" hardware plan)
+[[ $plan == *'power-profiles-daemon'* ]] || fail 'laptop plan must select power profiles'
+[[ $plan == *'mesa-vaapi'* ]] || fail 'AMD plan must note the standard mesa stack'
+[[ $plan != *'nvidia-open-dkms'* ]] || fail 'AMD plan must not select NVIDIA'
+
+# Apple T2: explicitly unsupported, no driver.
+plan=$(ARCHWARTS_LSPCI="$fixtures/lspci-t2" ARCHWARTS_LSUSB="$fixtures/lsusb" ARCHWARTS_DMI_ROOT="$dmi" ARCHWARTS_SYS_ROOT="$sysfs" "$cli" hardware plan)
+[[ $plan == *'apple-t2'* && $plan == *'unsupported'* ]] || fail 'T2 must be reported as unsupported/deferred'
+[[ $plan != *'nvidia-open-dkms'* && $plan != *'power-profiles-daemon'* ]] \
+  || fail 'T2 plan must not install drivers automatically'
+
+# Unknown GPU: safe, no automatic selection.
+plan=$(ARCHWARTS_LSPCI="$fixtures/lspci-intel" ARCHWARTS_LSUSB="$fixtures/lsusb" ARCHWARTS_DMI_ROOT="$dmi" ARCHWARTS_SYS_ROOT="$sysfs" "$cli" hardware plan)
+[[ $plan == *'gpu-unknown'* ]] || fail 'unknown GPU must produce a safe note'
+
+# Detection is pure description; plan is pure action. status combines both.
+status=$(ARCHWARTS_LSPCI="$fixtures/lspci-nvidia" ARCHWARTS_LSUSB="$fixtures/lsusb" ARCHWARTS_DMI_ROOT="$dmi" ARCHWARTS_SYS_ROOT="$sysfs" "$cli" hardware status)
+[[ $status == *'== detection =='* && $status == *'== plan =='* ]] \
+  || fail 'hardware status must separate detection from planning'
+
+printf 'PASS: Archwarts hardware profile system\n'

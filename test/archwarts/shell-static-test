@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+command -v quickshell >/dev/null 2>&1 || {
+  echo 'SKIP: quickshell not available (static QML validation runs in the clean Arch VM)'
+  exit 0
+}
+
+# Static QML validation: load the Archwarts shell config headlessly. This is a
+# fixture check (type resolution, imports, bindings); it does not open a
+# compositor, so it is NOT a graphical acceptance test.
+out=$(timeout 20 quickshell -n -p "$root/desktop/shell" 2>&1 || true)
+
+# Loading cleanly, or another instance already running the same config, are
+# both valid pass signals. An explicit load failure is not.
+if [[ $out == *'Configuration Loaded'* || $out == *'already running'* ]]; then
+  :
+elif [[ $out == *'Failed to load configuration'* ]]; then
+  fail "Archwarts shell config failed to load:\n$out"
+else
+  fail "Archwarts shell config must load cleanly; output:\n$out"
+fi
+
+# No inherited-runtime references may survive in the shell source tree.
+refs=$(rg -io 'omarchy|OMARCHY_PATH|/usr/share/omarchy|/var/lib/omarchy' \
+  "$root/desktop/shell" --glob '*.qml' --glob '*.js' --glob '*.sh' --glob '*.conf' || true)
+[[ -z $refs ]] || fail "shell source must not reference an inherited runtime:\n$refs"
+
+printf 'PASS: Archwarts shell static load and independence\n'

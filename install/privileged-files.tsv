@@ -1,0 +1,5 @@
+# Machine-wide files Archwarts installs as part of the privileged plan.
+# Data only: the plan generator renders these; no command executes them.
+#
+# source	target	mode
+desktop/apps/firefox/policies.json	/etc/firefox/policies/policies.json	0644

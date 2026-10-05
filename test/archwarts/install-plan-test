@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+test_root=$(mktemp -d)
+trap 'rm -rf "$test_root"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+export HOME="$test_root/home"
+export XDG_CONFIG_HOME="$test_root/config"
+export XDG_DATA_HOME="$test_root/data"
+export XDG_STATE_HOME="$test_root/state"
+export XDG_CACHE_HOME="$test_root/cache"
+export XDG_RUNTIME_DIR="$test_root/run"
+mkdir -p "$HOME" "$test_root/config" "$test_root/data" "$test_root/state" "$test_root/cache" "$test_root/run"
+
+mkdir -p "$test_root/bin"
+cat >"$test_root/bin/pacman" <<'STUB'
+#!/usr/bin/env bash
+[[ $1 == -Q && ${3:-} == hyprland ]]
+STUB
+chmod +x "$test_root/bin/pacman"
+
+cat >"$test_root/bin/systemctl" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  is-enabled) [[ ${4:-} == NetworkManager.service ]] ;;
+  is-masked) [[ ${4:-} == NetworkManager-wait-online.service ]] ;;
+esac
+STUB
+chmod +x "$test_root/bin/systemctl"
+
+cli="$root/bin/archwarts"
+
+output=$(PATH="$test_root/bin:$PATH" "$cli" install plan minimal)
+plan_file=$(printf '%s\n' "$output" | rg '^privileged-plan\tfile\t' | cut -f3)
+[[ -n $plan_file && -f $plan_file ]] || fail 'plan must write an explicit plan file'
+
+[[ $(rg -c '^packages\tpackage\thyprland\tofficial\tinstalled$' "$plan_file") == 1 ]] \
+  || fail 'plan must record installed official packages'
+[[ $(rg -c '^packages\tpackage\tfirefox\tofficial\tmissing$' "$plan_file") == 1 ]] \
+  || fail 'plan must record missing official packages'
+if rg -q '^packages\tpackage\tlocalsend\t' "$plan_file"; then
+  fail 'minimal plan must exclude default packages'
+fi
+
+output=$(PATH="$test_root/bin:$PATH" "$cli" install plan default)
+plan_file=$(printf '%s\n' "$output" | rg '^privileged-plan\tfile\t' | cut -f3)
+[[ $(rg -c '^packages\tpackage\tlocalsend\taur\tmissing$' "$plan_file") == 1 ]] \
+  || fail 'default plan must record explicit AUR sources'
+[[ $(rg -c '^# generated_at_utc\t' "$plan_file") == 1 ]] \
+  || fail 'plan must record generation timestamp'
+[[ $(rg -c '^# The privileged transaction plan is explicit and not executed here\.$' "$plan_file") == 1 ]] \
+  || fail 'plan must state that it is not executed'
+
+[[ $(rg -c '^services\tenable\tNetworkManager\.service\tsystemd\tenabled$' "$plan_file") == 1 ]] \
+  || fail 'plan must record enabled privileged services'
+[[ $(rg -c '^services\tmask\tNetworkManager-wait-online\.service\tsystemd\tmasked$' "$plan_file") == 1 ]] \
+  || fail 'plan must record masked privileged services'
+[[ $(rg -c '^services\tenable\tsddm\.service\tsystemd\tinactive$' "$plan_file") == 1 ]] \
+  || fail 'plan must record inactive privileged services'
+
+if PATH="$test_root/bin:$PATH" "$cli" install plan unknown >/dev/null 2>&1; then
+  fail 'unknown plan profile must be rejected'
+fi
+
+if PATH="$test_root/bin:$PATH" ARCHWARTS_PACMAN=missing-pacman \
+  "$cli" install plan minimal >/dev/null 2>&1; then
+  fail 'plan must fail when pacman is unavailable'
+fi
+
+printf 'PASS: Archwarts privileged plan generation\n'

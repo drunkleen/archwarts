@@ -1,0 +1,57 @@
+# User applications
+bitwarden
+bitwarden-cli
+gimp
+libreoffice-fresh
+mpv
+obs-studio
+
+# Editor and extended language coverage
+neovim
+noto-fonts-cjk
+
+# Dolphin and archive integration
+7zip
+ark
+dolphin-plugins
+ffmpegthumbnailer
+ffmpegthumbs
+kdegraphics-thumbnailers
+kimageformats
+qt6-imageformats
+
+# Development and containers
+base-devel
+docker
+docker-buildx
+docker-compose
+lazydocker
+lazygit
+mise
+
+# Desktop utilities and diagnostics
+bat
+btop
+eza
+fastfetch
+fd
+fzf
+git
+gnome-disk-utility
+inxi
+plocate
+ripgrep
+tmux
+tree
+zoxide
+
+# Printing and local sharing
+avahi
+cups
+cups-filters
+cups-pk-helper
+localsend
+system-config-printer
+
+# Power management
+power-profiles-daemon

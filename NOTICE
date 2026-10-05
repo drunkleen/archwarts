@@ -1,0 +1,19 @@
+Archwarts contains software derived from Omarchy.
+
+Omarchy copyright (c) David Heinemeier Hansson and is made available under the
+MIT License included in this repository. Archwarts preserves that copyright
+and permission notice for the derived software.
+
+The Archwarts name, current project direction, and new implementation work are
+independent. References to Omarchy that remain in inherited source identify
+historical implementation, compatibility surfaces, or attribution and do not
+represent a required Archwarts infrastructure dependency.
+
+Third-party themes, fonts, icons, wallpapers, and data remain subject to their
+respective licenses. They must be reviewed before an Archwarts release.
+
+Full provenance, attribution, and asset records:
+
+- `THIRD_PARTY_NOTICES.md`
+- `docs/archwarts/provenance.md`
+- `docs/archwarts/asset-provenance.md`

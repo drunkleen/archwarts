@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+test_root=$(mktemp -d)
+trap 'rm -rf "$test_root"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+export HOME="$test_root/home"
+export XDG_CONFIG_HOME="$test_root/config"
+export XDG_DATA_HOME="$test_root/data"
+export XDG_STATE_HOME="$test_root/state"
+export XDG_CACHE_HOME="$test_root/cache"
+export XDG_RUNTIME_DIR="$test_root/run"
+export XDG_PICTURES_DIR="$test_root/Pictures"
+for d in home config data state cache run; do mkdir -p "$test_root/$d"; done
+
+cli="$root/bin/archwarts"
+bin_dir="$test_root/bin"
+mkdir -p "$bin_dir"
+
+# Fixture grim records its args and creates the output file.
+cat >"$bin_dir/grim" <<'STUB'
+#!/usr/bin/env bash
+echo "grim $*" >>"$FIXTURE_LOG"
+: >"${@: -1}"
+exit 0
+STUB
+cat >"$bin_dir/slurp" <<'STUB'
+#!/usr/bin/env bash
+echo "0,0 100x100"
+STUB
+cat >"$bin_dir/wl-copy" <<'STUB'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "wl-copy called" >>"$FIXTURE_LOG"
+STUB
+cat >"$bin_dir/hyprctl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"at":[10,20],"size":[640,480]}'
+STUB
+chmod +x "$bin_dir/grim" "$bin_dir/slurp" "$bin_dir/wl-copy" "$bin_dir/hyprctl"
+
+export FIXTURE_LOG="$test_root/log"
+
+# fullscreen capture
+out=$(PATH="$bin_dir:$PATH" "$cli" capture fullscreen)
+[[ $out == "$test_root/Pictures/Screenshots/"*.png ]] || fail 'fullscreen capture must save under Screenshots'
+rg -q 'grim -g' "$FIXTURE_LOG" 2>/dev/null && fail 'fullscreen must not pass -g'
+rg -q 'grim ' "$FIXTURE_LOG" || fail 'fullscreen must invoke grim'
+
+# region capture uses slurp geometry
+: >"$FIXTURE_LOG"
+out=$(PATH="$bin_dir:$PATH" "$cli" capture region)
+rg -q 'grim -g 0,0 100x100' "$FIXTURE_LOG" || fail 'region capture must pass slurp geometry'
+
+# window capture uses hyprctl active geometry
+: >"$FIXTURE_LOG"
+out=$(PATH="$bin_dir:$PATH" "$cli" capture window)
+rg -q 'grim -g 10,20 640x480' "$FIXTURE_LOG" || fail 'window capture must use active window geometry'
+
+# clipboard copy happens
+rg -q 'wl-copy called' "$FIXTURE_LOG" || fail 'capture must copy to clipboard'
+
+# unknown mode rejected
+if PATH="$bin_dir:$PATH" "$cli" capture bogus >/dev/null 2>&1; then
+  fail 'unknown capture mode must be rejected'
+fi
+
+printf 'PASS: Archwarts capture command\n'

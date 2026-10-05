@@ -1,0 +1,60 @@
+# Desktop session and shell
+hyprland
+hyprland-guiutils
+hyprpicker
+hyprpolkitagent
+quickshell
+sddm
+uwsm
+
+# Portals and XDG integration
+xdg-desktop-portal-gtk
+xdg-desktop-portal-hyprland
+xdg-terminal-exec
+
+# Default applications required by the desktop contract
+dolphin
+firefox
+foot
+kio-extras
+
+# Baseline text and desktop icon fonts
+noto-fonts
+noto-fonts-emoji
+otf-font-awesome
+ttf-jetbrains-mono-nerd
+
+# Audio
+alsa-utils
+pamixer
+pipewire
+pipewire-alsa
+pipewire-jack
+pipewire-pulse
+wireplumber
+
+# Network, Bluetooth, and removable media
+bluez
+bluez-tools
+bluez-utils
+networkmanager
+udiskie
+udisks2
+
+# Capture and clipboard primitives
+ffmpeg
+grim
+slurp
+wl-clipboard
+
+# Runtime and diagnostics used by the desktop
+brightnessctl
+fontconfig
+imagemagick
+inotify-tools
+jq
+libsecret
+pacman-contrib
+qrencode
+socat
+wtype

@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+test_root=$(mktemp -d)
+trap 'rm -rf "$test_root"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+export HOME="$test_root/home"
+export XDG_CONFIG_HOME="$test_root/config"
+export XDG_DATA_HOME="$test_root/data"
+export XDG_STATE_HOME="$test_root/state"
+export XDG_CACHE_HOME="$test_root/cache"
+export XDG_RUNTIME_DIR="$test_root/run"
+for d in home config data state cache run; do mkdir -p "$test_root/$d"; done
+
+cli="$root/bin/archwarts"
+bin_dir="$test_root/bin"
+mkdir -p "$bin_dir"
+
+# Mock curl: network reachable.
+cat >"$bin_dir/curl" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+
+# Mock pacman: records the last invocation and answers queries deterministically.
+cat >"$bin_dir/pacman" <<'STUB'
+#!/usr/bin/env bash
+echo "pacman $*" >>"$FIXTURE_PACMAN_LOG"
+case "$1" in
+  -Syu) exit 0 ;;
+  -Qqm) printf 'aurpkg-one\naurpkg-two\n' ;;
+  -Qdt) printf 'orphan-one\n' ;;
+  *) exit 0 ;;
+esac
+STUB
+
+cat >"$bin_dir/systemctl" <<'STUB'
+#!/usr/bin/env bash
+echo "systemctl $*" >>"$FIXTURE_SYSTEMCTL_LOG"
+if [[ ${1:-} == --failed ]]; then
+  printf 'failed-unit.service\n'
+  exit 0
+fi
+exit 0
+STUB
+
+# Mock sudo: records the privilege boundary and drops it for the mock pacman.
+cat >"$bin_dir/sudo" <<'STUB'
+#!/usr/bin/env bash
+echo "sudo $*" >>"$FIXTURE_SUDO_LOG"
+exec "$@"
+STUB
+chmod +x "$bin_dir/curl" "$bin_dir/pacman" "$bin_dir/systemctl" "$bin_dir/sudo"
+export FIXTURE_PACMAN_LOG="$test_root/pacman.log"
+export FIXTURE_SYSTEMCTL_LOG="$test_root/systemctl.log"
+export FIXTURE_SUDO_LOG="$test_root/sudo.log"
+
+# A fixture migration root with two ordered migrations.
+mkdir -p "$test_root/migrations"
+cat >"$test_root/migrations/10-first.sh" <<'EOF'
+echo "migration-10"
+EOF
+cat >"$test_root/migrations/20-second.sh" <<'EOF'
+echo "migration-20"
+EOF
+
+update_dir="$test_root/state/archwarts/update"
+
+# --- preflight (read-only) ---
+out=$(PATH="$bin_dir:$PATH" "$cli" update preflight)
+[[ $out == *'network	ok'* ]] || fail 'preflight must report network ok'
+[[ $out == *'pacman-lock	ok'* ]] || fail 'preflight must report no pacman lock'
+[[ $out == *'disk	ok'* ]] || fail 'preflight must report sufficient disk'
+[[ $out == *'pacman	ok'* ]] || fail 'preflight must report pacman available'
+
+# --- official phase without execute gate: planned, never executed ---
+out=$(PATH="$bin_dir:$PATH" "$cli" update official)
+[[ $out == *'official	planned'* ]] || fail 'official must be planned without the execute gate'
+[[ -f "$update_dir/last-official.tsv" ]] || fail 'official status file must be written'
+[[ $(cut -f2 "$update_dir/last-official.tsv") == planned ]] || fail 'official status must be planned'
+if [[ -f "$FIXTURE_PACMAN_LOG" ]] && rg -q '^pacman -Syu' "$FIXTURE_PACMAN_LOG"; then
+  fail 'pacman -Syu must not execute without the execute gate'
+fi
+
+# --- official phase with execute gate and mocked pacman ---
+out=$(PATH="$bin_dir:$PATH" ARCHWARTS_UPDATE_EXECUTE=1 ARCHWARTS_UPDATE_INHIBIT=0 "$cli" update official)
+[[ $out == *'official	ok'* ]] || fail 'official must succeed with mocked pacman'
+rg -q '^pacman -Syu --noconfirm$' "$FIXTURE_PACMAN_LOG" \
+  || fail 'exactly one pacman -Syu must run when gated'
+[[ $(rg -c '^pacman -Syu' "$FIXTURE_PACMAN_LOG") == 1 ]] \
+  || fail 'exactly one full official upgrade must run'
+
+# --- AUR phase independent; helper failure does not affect official ---
+out=$(PATH="$bin_dir:$PATH" ARCHWARTS_UPDATE_EXECUTE=1 ARCHWARTS_AUR_HELPER=missing-helper "$cli" update aur || true)
+[[ $out == *'aur	failed'* ]] || fail 'AUR must report helper failure independently'
+official_out=$(PATH="$bin_dir:$PATH" "$cli" update status)
+[[ $official_out == *'official	ok'* ]] || fail 'official status must remain ok after AUR failure'
+
+out=$(PATH="$bin_dir:$PATH" "$cli" update aur)
+[[ $out == *'aur	skip'* ]] || fail 'AUR must skip when no helper is configured'
+
+# --- ordered migrations with fixture root ---
+out=$(PATH="$bin_dir:$PATH" ARCHWARTS_UPDATE_EXECUTE=1 ARCHWARTS_MIGRATIONS_ROOT="$test_root/migrations" "$cli" update migrations)
+[[ $out == *'migration	10-first.sh'* && $out == *'migration	20-second.sh'* ]] \
+  || fail 'migrations must be listed in order'
+[[ $(rg -c '^10-first\.sh\t' "$update_dir/migrations-applied.tsv") == 1 ]] \
+  || fail 'migration 10 must be recorded applied'
+
+# re-run migrations: already applied are skipped
+out=$(PATH="$bin_dir:$PATH" ARCHWARTS_UPDATE_EXECUTE=1 ARCHWARTS_MIGRATIONS_ROOT="$test_root/migrations" "$cli" update migrations)
+[[ $out != *'migration	10-first.sh'* ]] || fail 'applied migrations must not rerun'
+
+# --- report gathers independent diagnostics ---
+out=$(PATH="$bin_dir:$PATH" ARCHWARTS_SYSTEMCTL="$bin_dir/systemctl" "$cli" update report)
+[[ $out == *'official	ok'* ]] || fail 'report must reflect official status'
+[[ $out == *'revision	0.1.0'* ]] || fail 'report must record the Archwarts revision'
+[[ $out == *'orphans	1'* ]] || fail 'report must count orphans (read-only)'
+[[ $out == *'foreign-packages	2'* ]] || fail 'report must count foreign packages (read-only)'
+[[ $out == *'failed-services	1'* ]] || fail 'report must count failed services (read-only)'
+[[ $out == *'log	'* ]] || fail 'report must point at the durable log'
+
+# --- full run orchestrates phases; pacman never runs without the gate ---
+: >"$FIXTURE_PACMAN_LOG"
+out=$(PATH="$bin_dir:$PATH" "$cli" update run || true)
+[[ $out == *'official	planned'* ]] || fail 'run must plan official without the gate'
+[[ $out == *'aur	skip'* ]] || fail 'run must skip AUR without a helper'
+[[ $out == *'revision	0.1.0'* ]] || fail 'run must record the revision'
+if rg -q '^pacman -Syu' "$FIXTURE_PACMAN_LOG"; then
+  fail 'run must not execute pacman without the gate'
+fi
+[[ -s "$update_dir/log" ]] || fail 'durable update log must exist'
+
+# --- status reads recorded state ---
+out=$(PATH="$bin_dir:$PATH" "$cli" update status)
+[[ $out == *'official	planned'* ]] || fail 'status must read the recorded official state'
+
+printf 'PASS: Archwarts independent update system\n'

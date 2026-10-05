@@ -1,0 +1,8 @@
+[General]
+RememberOpenedTabs=true
+TerminalApplication=foot
+TerminalArguments=
+Version=5.0
+
+[PreviewSettings]
+Plugins=imagethumbnail,audiothumbnail,videothumbnail,fontthumbnail,svgthumbnail,textthumbnail

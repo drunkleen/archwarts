@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+entrypoint=$(readlink -f "${BASH_SOURCE[0]}")
+source_root=$(readlink -f "${entrypoint%/*}/..")
+source "$source_root/lib/archwarts/paths.sh"
+source "$source_root/lib/archwarts/packages.sh"
+source "$source_root/lib/archwarts/ownership.sh"
+source "$source_root/lib/archwarts/stages.sh"
+source "$source_root/lib/archwarts/install.sh"
+source "$source_root/lib/archwarts/shell.sh"
+source "$source_root/lib/archwarts/capture.sh"
+source "$source_root/lib/archwarts/apps.sh"
+source "$source_root/lib/archwarts/theme.sh"
+source "$source_root/lib/archwarts/defaults.sh"
+source "$source_root/lib/archwarts/update.sh"
+source "$source_root/lib/archwarts/hardware.sh"
+source "$source_root/lib/archwarts/doctor.sh"
+source "$source_root/lib/archwarts/uninstall.sh"
+source "$source_root/lib/archwarts/audit.sh"
+
+ARCHWARTS_SOURCE_ROOT=$source_root
+export ARCHWARTS_SOURCE_ROOT
+archwarts_init_paths
+
+usage() {
+  printf '%s\n' \
+    'Usage: archwarts <command>' \
+    '' \
+    'Commands:' \
+    '  version   Print the Archwarts source version' \
+    '  paths     Print resolved source and XDG runtime paths' \
+    '  doctor    Validate the Archwarts skeleton without changing the system' \
+    '  package   Inspect package groups and installation profiles' \
+    '  install   Preflight, plan, stage, and status (unprivileged)' \
+    '  shell     Launch the Archwarts shell or send it an IPC trigger' \
+    '  capture   Capture a screenshot (region|window|fullscreen)' \
+    '  launch-app Launch a desktop application by entry id' \
+    '  theme     Apply or inspect the Archwarts theme palette' \
+    '  defaults  Apply or inspect default application integration' \
+    '  web-app   Create a URL desktop entry that opens in Firefox' \
+    '  update    Preflight, plan, run, or report the Archwarts update' \
+    '  hardware  Detect the machine and plan hardware actions' \
+    '  uninstall Plan or perform the conservative Archwarts uninstall' \
+    '  preflight-audit Run the static pre-VM acceptance audit' \
+    '  release-audit Run the static release-candidate audit' \
+    '  help      Show this help'
+}
+
+install_usage() {
+  printf '%s\n' \
+    'Usage: archwarts install preflight [minimal|default]' \
+    '       archwarts install plan [minimal|default]' \
+    '       archwarts install stage <base|desktop-core>' \
+    '       archwarts install status' \
+    '' \
+    'preflight, plan, stage, and status are unprivileged and idempotent.' \
+    'plan generates an explicit, non-executed privileged transaction plan.' \
+    'No privileged action is executed by any of these commands.'
+}
+
+install_command() {
+  local action=${1:-} profile=${2:-default}
+
+  case $action in
+    preflight)
+      archwarts_install_preflight "$ARCHWARTS_SOURCE_ROOT" "$profile"
+      ;;
+    plan)
+      archwarts_install_plan "$ARCHWARTS_SOURCE_ROOT" "$profile"
+      ;;
+    stage)
+      archwarts_stage_apply "$profile"
+      ;;
+    status)
+      archwarts_install_status
+      ;;
+    help|-h|--help)
+      install_usage
+      ;;
+    *)
+      install_usage >&2
+      return 2
+      ;;
+  esac
+}
+
+package_usage() {
+  printf '%s\n' \
+    'Usage: archwarts package list <core|default|optional|remove>' \
+    '       archwarts package plan [minimal|default]'
+}
+
+package_command() {
+  local action=${1:-} value=${2:-}
+
+  case $action in
+    list)
+      [[ -n $value ]] || {
+        package_usage >&2
+        return 2
+      }
+      archwarts_packages "$ARCHWARTS_SOURCE_ROOT" "$value"
+      ;;
+    plan)
+      archwarts_package_plan "$ARCHWARTS_SOURCE_ROOT" "${value:-default}"
+      ;;
+    help|-h|--help)
+      package_usage
+      ;;
+    *)
+      package_usage >&2
+      return 2
+      ;;
+  esac
+}
+
+print_paths() {
+  printf '%s\n' \
+    "source=$ARCHWARTS_SOURCE_ROOT" \
+    "runtime=$ARCHWARTS_PATH" \
+    "config=$ARCHWARTS_CONFIG_HOME" \
+    "data=$ARCHWARTS_DATA_HOME" \
+    "state=$ARCHWARTS_STATE_HOME" \
+    "cache=$ARCHWARTS_CACHE_HOME" \
+    "run=$ARCHWARTS_RUNTIME_HOME" \
+    "user_bin=${HOME:?HOME must be set}/.local/bin"
+}
+
+doctor() {
+  local failures=0 name value doctor_output
+
+  if [[ -r $ARCHWARTS_SOURCE_ROOT/ARCHWARTS_VERSION ]]; then
+    printf 'ok: version file\n'
+  else
+    printf 'error: missing version file: %s\n' "$ARCHWARTS_SOURCE_ROOT/ARCHWARTS_VERSION" >&2
+    failures=$((failures + 1))
+  fi
+
+  for name in ARCHWARTS_CONFIG_HOME ARCHWARTS_DATA_HOME ARCHWARTS_STATE_HOME \
+    ARCHWARTS_CACHE_HOME ARCHWARTS_RUNTIME_HOME ARCHWARTS_PATH; do
+    value=${!name}
+    if [[ $value == /* ]]; then
+      printf 'ok: %s=%s\n' "$name" "$value"
+    else
+      printf 'error: %s is not absolute: %s\n' "$name" "$value" >&2
+      failures=$((failures + 1))
+    fi
+  done
+
+  for name in core default optional remove; do
+    if archwarts_validate_package_manifest "$ARCHWARTS_SOURCE_ROOT" "$name"; then
+      printf 'ok: %s package manifest\n' "$name"
+    else
+      failures=$((failures + 1))
+    fi
+  done
+
+  doctor_output=$(archwarts_doctor)
+  printf '%s\n' "$doctor_output"
+  if rg -q '^fail\t' <<<"$doctor_output"; then
+    failures=$((failures + 1))
+  fi
+
+  ((failures == 0))
+}
+
+case ${1:-help} in
+  help|-h|--help)
+    usage
+    ;;
+  version|-V|--version)
+    read -r version <"$ARCHWARTS_SOURCE_ROOT/ARCHWARTS_VERSION"
+    printf '%s\n' "$version"
+    ;;
+  paths)
+    print_paths
+    ;;
+  doctor)
+    doctor
+    ;;
+  package)
+    shift
+    package_command "$@"
+    ;;
+  install)
+    shift
+    install_command "$@"
+    ;;
+  shell)
+    shift
+    case ${1:-status} in
+      launch)
+        archwarts_shell_launch
+        ;;
+      ipc)
+        archwarts_shell_ipc "${2:?ipc target required}" "${3:?ipc action required}" "${4:-"{}"}"
+        ;;
+      status)
+        archwarts_shell_status
+        ;;
+      *)
+        printf 'Usage: archwarts shell <launch|ipc <target> <action> [payload]|status>\n' >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  capture)
+    shift
+    archwarts_capture "${1:-region}"
+    ;;
+  launch-app)
+    shift
+    archwarts_launch_app "${1:-}"
+    ;;
+  theme)
+    shift
+    case ${1:-status} in
+      apply) archwarts_theme_apply "${2:-default}" ;;
+      status) archwarts_theme_status ;;
+      *) printf 'Usage: archwarts theme <apply [name]|status>\n' >&2; exit 2 ;;
+    esac
+    ;;
+  defaults)
+    shift
+    case ${1:-status} in
+      apply) archwarts_defaults_apply ;;
+      status) archwarts_defaults_status ;;
+      *) printf 'Usage: archwarts defaults <apply|status>\n' >&2; exit 2 ;;
+    esac
+    ;;
+  web-app)
+    shift
+    archwarts_web_app "${1:-}" "${2:-}"
+    ;;
+  hardware)
+    shift
+    case ${1:-status} in
+      detect) archwarts_hw_detect ;;
+      plan) archwarts_hw_plan "$(archwarts_hw_detect)" ;;
+      status) archwarts_hw_status ;;
+      *) printf 'Usage: archwarts hardware <detect|plan|status>\n' >&2; exit 2 ;;
+    esac
+    ;;
+  uninstall)
+    shift
+    case ${1:-} in
+      plan) archwarts_uninstall_plan no ;;
+      --include-state) archwarts_uninstall yes ;;
+      *) archwarts_uninstall no ;;
+    esac
+    ;;
+  preflight-audit)
+    archwarts_audit_prevm
+    ;;
+  release-audit)
+    archwarts_release_audit
+    ;;
+  update)
+    shift
+    case ${1:-status} in
+      run) archwarts_update_run ;;
+      preflight) archwarts_update_preflight ;;
+      official) archwarts_update_official ;;
+      aur) archwarts_update_aur ;;
+      migrations) archwarts_update_migrations ;;
+      report) archwarts_update_report ;;
+      status) archwarts_update_status ;;
+      *)
+        printf 'Usage: archwarts update <run|preflight|official|aur|migrations|report|status>\n' >&2
+        printf 'Privileged phases execute only with ARCHWARTS_UPDATE_EXECUTE=1.\n' >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    printf 'Unknown command: %s\n\n' "$1" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

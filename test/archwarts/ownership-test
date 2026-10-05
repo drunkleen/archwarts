@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+test_root=$(mktemp -d)
+trap 'rm -rf "$test_root"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+export HOME="$test_root/home"
+export XDG_STATE_HOME="$test_root/state"
+source "$root/lib/archwarts/paths.sh"
+archwarts_init_paths
+source "$root/lib/archwarts/ownership.sh"
+
+state_dir=$(archwarts_install_state_dir)
+[[ $state_dir == "$XDG_STATE_HOME/archwarts/install" ]] \
+  || fail "install state dir must live under ARCHWARTS_STATE_HOME"
+
+source_file="$test_root/source.txt"
+printf 'managed content\n' >"$source_file"
+source_sha=$(archwarts_sha256 "$source_file")
+
+target="$test_root/config/managed.txt"
+archwarts_install_apply_file base "$source_file" "$target" \
+  || fail 'first apply must succeed'
+[[ -f $target ]] || fail 'target file must exist after apply'
+[[ $(archwarts_ownership_lookup "$target") == "$source_sha" ]] \
+  || fail 'ownership record must store the applied sha256'
+
+archwarts_install_apply_file base "$source_file" "$target" \
+  || fail 're-apply of unchanged file must be idempotent'
+
+printf 'conflicting content\n' >"$target"
+if archwarts_install_apply_file base "$source_file" "$target"; then
+  fail 'apply must refuse to overwrite unmanaged modified content'
+fi
+
+recorded=$(archwarts_ownership_lookup "$target")
+[[ -n $recorded ]] || fail 'modified file must remain recorded as owned'
+[[ $(cat "$target") == 'conflicting content' ]] \
+  || fail 'conflicting target must not be overwritten'
+
+# Re-staging after deletion must not leave a stale ownership row.
+rm -f "$target"
+archwarts_install_apply_file base "$source_file" "$target" \
+  || fail 're-apply after deletion must succeed'
+[[ $(rg -c "^base\t$target\t" "$(archwarts_ownership_file)") == 1 ]] \
+  || fail 're-stage must leave exactly one ownership row per path'
+[[ $(archwarts_ownership_lookup "$target") == "$source_sha" ]] \
+  || fail 're-stage ownership must match the applied sha'
+
+printf 'PASS: Archwarts ownership manifest\n'

@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+test_root=$(mktemp -d)
+trap 'rm -rf "$test_root"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+export HOME="$test_root/home"
+export XDG_CONFIG_HOME="$test_root/config"
+export XDG_DATA_HOME="$test_root/data"
+export XDG_STATE_HOME="$test_root/state"
+export XDG_CACHE_HOME="$test_root/cache"
+export XDG_RUNTIME_DIR="$test_root/run"
+for d in home config data state cache run; do mkdir -p "$test_root/$d"; done
+
+cli="$root/bin/archwarts"
+bin_dir="$test_root/bin"
+mkdir -p "$bin_dir"
+
+cat >"$bin_dir/xdg-settings" <<'STUB'
+#!/usr/bin/env bash
+if [[ ${1:-} == set && ${2:-} == default-web-browser ]]; then
+  printf 'xdg-settings set default-web-browser %s\n' "$3" >>"$FIXTURE_XDG_LOG"
+elif [[ ${1:-} == get ]]; then
+  printf 'firefox.desktop\n'
+else
+  printf 'xdg-settings unknown %s %s\n' "$1" "$2" >>"$FIXTURE_XDG_LOG"
+fi
+STUB
+cat >"$bin_dir/xdg-mime" <<'STUB'
+#!/usr/bin/env bash
+if [[ ${1:-} == default ]]; then
+  printf 'xdg-mime default %s %s\n' "$2" "$3" >>"$FIXTURE_XDG_LOG"
+elif [[ ${1:-} == query && ${3:-} == inode/directory ]]; then
+  printf 'org.kde.dolphin.desktop\n'
+else
+  printf 'xdg-mime unknown %s %s %s\n' "$1" "$2" "$3" >>"$FIXTURE_XDG_LOG"
+fi
+STUB
+chmod +x "$bin_dir/xdg-settings" "$bin_dir/xdg-mime"
+export FIXTURE_XDG_LOG="$test_root/xdg.log"
+
+"$cli" install stage base >/dev/null
+"$cli" install stage desktop-core >/dev/null
+
+out=$(PATH="$bin_dir:$PATH" "$cli" defaults apply)
+[[ $out == *'default applications configured'* ]] || fail 'defaults apply must succeed'
+
+rg -q '^xdg-settings set default-web-browser firefox\.desktop$' "$FIXTURE_XDG_LOG" \
+  || fail 'defaults must set Firefox as the web browser'
+rg -q '^xdg-mime default org\.kde\.dolphin\.desktop inode/directory$' "$FIXTURE_XDG_LOG" \
+  || fail 'defaults must set Dolphin for directories'
+
+menus="$test_root/data/kio/servicemenus"
+[[ -f "$menus/archwarts-localsend.desktop" ]] || fail 'LocalSend service menu must be staged'
+[[ -f "$menus/archwarts-transcode.desktop" ]] || fail 'transcode service menu must be staged'
+rg -q 'Exec=localsend send %F' "$menus/archwarts-localsend.desktop" \
+  || fail 'LocalSend menu must invoke localsend'
+
+dolphinrc="$test_root/config/dolphinrc"
+[[ -f $dolphinrc ]] || fail 'dolphinrc must be staged'
+rg -q '^TerminalApplication=foot$' "$dolphinrc" || fail 'dolphinrc must use foot as terminal'
+
+ownership="$test_root/state/archwarts/install/ownership.tsv"
+[[ $(rg -c '^apps\t' "$ownership") -ge 3 ]] || fail 'dolphin integration must be recorded as owned'
+
+status=$(PATH="$bin_dir:$PATH" "$cli" defaults status)
+[[ $status == *'browser	firefox.desktop'* ]] || fail 'defaults status must report Firefox'
+[[ $status == *'file-manager	org.kde.dolphin.desktop'* ]] || fail 'defaults status must report Dolphin'
+
+# Web-app URL entries open in Firefox as normal windows.
+entry=$(PATH="$bin_dir:$PATH" "$cli" web-app "My App" "https://example.com")
+[[ $entry == "$test_root/data/applications/archwarts-my-app.desktop" ]] \
+  || fail 'web-app must create a URL desktop entry under user applications'
+rg -q 'Exec=firefox --new-window "https://example.com"' "$entry" \
+  || fail 'web-app entry must open the URL in Firefox'
+
+# Refuse to overwrite an unmanaged entry.
+printf 'foreign\n' >"$entry"
+if PATH="$bin_dir:$PATH" "$cli" web-app "My App" "https://example.com" >/dev/null 2>&1; then
+  fail 'web-app must refuse to overwrite an unmanaged entry'
+fi
+
+# Malicious URLs must be sanitized: the Exec line must contain exactly one
+# quoted argument with no injection-capable characters.
+if PATH="$bin_dir:$PATH" "$cli" web-app "Safe" 'https://x";rm -rf /;' >/dev/null 2>&1; then
+  safe_entry="$test_root/data/applications/archwarts-safe.desktop"
+  [[ -f $safe_entry ]] || fail 'sanitized web-app entry must be created'
+  exec_line=$(rg '^Exec=' "$safe_entry")
+  [[ $exec_line =~ ^Exec=firefox\ --new-window\ \"[^\"]+\"$ ]] \
+    || fail "web-app Exec must be a single quoted argument: $exec_line"
+fi
+if PATH="$bin_dir:$PATH" "$cli" web-app "Safe" 'file:///etc/passwd' >/dev/null 2>&1; then
+  fail 'web-app must reject non-http(s) urls'
+fi
+
+# Re-apply is idempotent: the dolphinrc is owned and identical.
+PATH="$bin_dir:$PATH" "$cli" defaults apply >/dev/null
+[[ $(rg -c '^TerminalApplication=foot$' "$dolphinrc") == 1 ]] \
+  || fail 'defaults re-apply must stay idempotent'
+
+# The staged Hyprland config reflects the migrations.
+hypr="$test_root/config/archwarts/hypr/hyprland.conf"
+rg -q 'env = MOZ_ENABLE_WAYLAND,1' "$hypr" || fail 'Hyprland must enable Firefox Wayland'
+rg -q 'Picture-in-Picture' "$hypr" || fail 'Hyprland must float Firefox PiP'
+if rg -q 'float, class:\^\(yad\|org\.kde\.dolphin' "$hypr"; then
+  fail 'Dolphin must not be floated'
+fi
+
+# The privileged plan includes the Firefox enterprise policy.
+PATH="$bin_dir:$PATH" "$cli" install plan minimal >/dev/null
+plan=$(ls "$test_root/state/archwarts/install/plan.tsv")
+rg -q '^files\tinstall\t/etc/firefox/policies/policies\.json\t' "$plan" \
+  || fail 'privileged plan must include the Firefox policy file'
+
+# No rejected defaults anywhere in the app integration tree.
+if rg -qi 'chromium|nautilus|1password' "$root/desktop/apps" "$root/desktop/shell/menu/Menu.qml" 2>/dev/null; then
+  fail 'app integration must not reference rejected defaults'
+fi
+
+printf 'PASS: Archwarts application migrations\n'

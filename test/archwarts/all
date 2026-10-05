@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+test_dir=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")")
+
+for test_file in "$test_dir"/*-test; do
+  [[ -x $test_file ]] || continue
+  "$test_file"
+done

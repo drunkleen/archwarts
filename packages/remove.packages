@@ -1,0 +1,17 @@
+# Replaced defaults
+chromium
+nautilus
+nautilus-python
+sushi
+1password
+1password-cli
+
+# Omarchy infrastructure and package identity
+linux-omarchy
+linux-omarchy-headers
+omarchy
+omarchy-dev
+omarchy-keyring
+omarchy-nvim
+omarchy-settings
+omarchy-settings-dev

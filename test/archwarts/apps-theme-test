@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+test_root=$(mktemp -d)
+trap 'rm -rf "$test_root"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+export HOME="$test_root/home"
+export XDG_CONFIG_HOME="$test_root/config"
+export XDG_DATA_HOME="$test_root/data"
+export XDG_STATE_HOME="$test_root/state"
+export XDG_CACHE_HOME="$test_root/cache"
+export XDG_RUNTIME_DIR="$test_root/run"
+for d in home config data state cache run; do mkdir -p "$test_root/$d"; done
+
+cli="$root/bin/archwarts"
+
+# Fixture gtk-launch records the entry id.
+mkdir -p "$test_root/bin"
+cat >"$test_root/bin/gtk-launch" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >"$FIXTURE_GTK_LOG"
+exit 0
+STUB
+chmod +x "$test_root/bin/gtk-launch"
+export FIXTURE_GTK_LOG="$test_root/gtk-launch.log"
+
+PATH="$test_root/bin:$PATH" "$cli" launch-app firefox
+for _ in $(seq 1 20); do [[ -s "$FIXTURE_GTK_LOG" ]] && break; sleep 0.1; done
+[[ $(cat "$FIXTURE_GTK_LOG") == 'firefox.desktop' ]] \
+  || fail 'launch-app must resolve the .desktop suffix'
+
+: >"$FIXTURE_GTK_LOG"
+PATH="$test_root/bin:$PATH" "$cli" launch-app org.kde.dolphin.desktop
+for _ in $(seq 1 20); do [[ -s "$FIXTURE_GTK_LOG" ]] && break; sleep 0.1; done
+[[ $(cat "$FIXTURE_GTK_LOG") == 'org.kde.dolphin.desktop' ]] \
+  || fail 'launch-app must preserve an existing .desktop suffix'
+
+if PATH="$test_root/bin:$PATH" "$cli" launch-app >/dev/null 2>&1; then
+  fail 'launch-app without an id must be rejected'
+fi
+if PATH="$test_root/bin:$PATH" "$cli" launch-app 'x;rm -rf /' >/dev/null 2>&1; then
+  fail 'launch-app must reject ids with command characters'
+fi
+
+# Theme apply and status
+"$cli" install stage base >/dev/null
+out=$("$cli" theme apply default)
+[[ $out == "$test_root/config/archwarts/theme/palette.conf" ]] \
+  || fail 'theme apply must stage the palette under the Archwarts config home'
+palette="$test_root/config/archwarts/theme/palette.conf"
+rg -q '^accent=#89b4fa$' "$palette" || fail 'default palette must be staged'
+status=$("$cli" theme status)
+[[ $status == *'theme	active'* ]] || fail 'theme status must report an active palette'
+
+printf 'PASS: Archwarts app launch and theme\n'

@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+test_root=$(mktemp -d)
+trap 'rm -rf "$test_root"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+export HOME="$test_root/home"
+export XDG_CONFIG_HOME="$test_root/config"
+export XDG_DATA_HOME="$test_root/data"
+export XDG_STATE_HOME="$test_root/state"
+export XDG_CACHE_HOME="$test_root/cache"
+export XDG_RUNTIME_DIR="$test_root/run"
+for d in home config data state cache run; do mkdir -p "$test_root/$d"; done
+
+cli="$root/bin/archwarts"
+bin_dir="$test_root/bin"
+mkdir -p "$bin_dir"
+
+cat >"$bin_dir/systemctl" <<'STUB'
+#!/usr/bin/env bash
+if [[ ${1:-} == --failed ]]; then exit 1
+elif [[ ${1:-} == is-active ]]; then exit 0
+fi
+exit 0
+STUB
+cat >"$bin_dir/pgrep" <<'STUB'
+#!/usr/bin/env bash
+case "$2" in
+  Hyprland) exit 0 ;;
+  quickshell) exit 1 ;;
+  *) exit 0 ;;
+esac
+STUB
+cat >"$bin_dir/pacman" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  -Qqm) printf 'foreign-one\nforeign-two\n' ;;
+esac
+exit 0
+STUB
+chmod +x "$bin_dir/systemctl" "$bin_dir/pgrep" "$bin_dir/pacman"
+
+"$cli" install stage base >/dev/null
+"$cli" install stage desktop-core >/dev/null
+
+export ARCHWARTS_SYSTEMCTL="$bin_dir/systemctl"
+export ARCHWARTS_PGREP="$bin_dir/pgrep"
+export ARCHWARTS_PACMAN="$bin_dir/pacman"
+
+# --- doctor: read-only diagnostics ---
+doctor=$(PATH="$bin_dir:$PATH" "$cli" doctor)
+[[ $doctor == *'ok: version file'* ]] || fail 'doctor must keep the skeleton version check'
+[[ $doctor == *'version	ok'* ]] || fail 'doctor must report the version'
+[[ $doctor == *'managed-files	ok'* ]] || fail 'doctor must report managed files intact'
+[[ $doctor == *'services	ok	no failed units'* ]] || fail 'doctor must report no failed services'
+[[ $doctor == *'hyprland	ok	running'* ]] || fail 'doctor must report Hyprland running'
+[[ $doctor == *'quickshell	warn	not running'* ]] || fail 'doctor must report Quickshell not running'
+[[ $doctor == *'portal	ok'* ]] || fail 'doctor must report the portal'
+[[ $doctor == *'pipewire	ok'* ]] || fail 'doctor must report PipeWire'
+[[ $doctor == *'network	ok	NetworkManager active'* ]] || fail 'doctor must report NetworkManager'
+[[ $doctor == *'bluetooth	ok	bluetooth active'* ]] || fail 'doctor must report Bluetooth'
+[[ $doctor == *'installer	ok'* ]] || fail 'doctor must report installer state'
+[[ $doctor == *'hardware	info'* ]] || fail 'doctor must report hardware state'
+
+# doctor must not mutate: running it twice yields identical state files.
+before=$(find "$test_root/state" -type f | sort)
+PATH="$bin_dir:$PATH" "$cli" doctor >/dev/null
+after=$(find "$test_root/state" -type f | sort)
+[[ $before == "$after" ]] || fail 'doctor must not mutate installer/update state'
+
+# --- uninstall plan ---
+hypr="$test_root/config/archwarts/hypr/hyprland.conf"
+shell_entry="$test_root/config/archwarts/shell/shell.qml"
+unrelated="$test_root/data/user-file.txt"
+printf 'unrelated\n' >"$unrelated"
+
+# Modify one managed file so uninstall must refuse it.
+printf 'user edit\n' >>"$shell_entry"
+
+# Record a state-owned file so uninstall must preserve state by default.
+printf 'state data\n' >"$test_root/state/archwarts/test-state.txt"
+printf 'apps\t%s\tfakesha\t%s\n' \
+  "$test_root/state/archwarts/test-state.txt" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  >>"$test_root/state/archwarts/install/ownership.tsv"
+
+plan=$(PATH="$bin_dir:$PATH" "$cli" uninstall plan || true)
+[[ $plan == *"remove	$hypr	managed and unmodified"* ]] \
+  || fail 'uninstall plan must remove unmodified managed files'
+[[ $plan == *"refuse	$shell_entry	managed but modified"* ]] \
+  || fail 'uninstall plan must refuse modified managed files'
+[[ $plan == *"preserve	$test_root/state/archwarts/test-state.txt"* ]] \
+  || fail 'uninstall plan must preserve state by default'
+
+# --- uninstall ---
+PATH="$bin_dir:$PATH" "$cli" uninstall >/dev/null 2>&1 && {
+  fail 'uninstall must return nonzero when files are refused'
+}
+[[ ! -e $hypr ]] || fail 'uninstall must remove the unmodified managed Hyprland config'
+[[ -e $shell_entry ]] || fail 'uninstall must not remove a modified managed file'
+[[ -e $unrelated ]] || fail 'uninstall must preserve unrelated user files'
+[[ -f "$test_root/state/archwarts/test-state.txt" ]] \
+  || fail 'uninstall must preserve state-owned files by default'
+
+printf 'PASS: Archwarts doctor and conservative uninstall\n'

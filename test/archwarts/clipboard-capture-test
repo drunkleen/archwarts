@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+test_root=$(mktemp -d)
+trap 'rm -rf "$test_root"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+# Fixture wl-paste: types come from FIXTURE_TYPES, text payload from
+# FIXTURE_TEXT, image payload from FIXTURE_IMAGE.
+cat >"$test_root/wl-paste" <<'STUB'
+#!/usr/bin/env bash
+if [[ ${1:-} == --list-types ]]; then
+  printf '%s\n' "${FIXTURE_TYPES:-}"
+  exit 0
+fi
+mime=""
+if [[ ${1:-} == --type ]]; then mime=$2; fi
+case "$mime" in
+  image/*) printf '%s' "${FIXTURE_IMAGE:-}" ;;
+  text|"") printf '%s' "${FIXTURE_TEXT:-}" ;;
+esac
+STUB
+chmod +x "$test_root/wl-paste"
+
+capture="$root/desktop/shell/clipboard/capture.sh"
+export XDG_STATE_HOME="$test_root/state"
+mkdir -p "$test_root/bin"
+cp "$test_root/wl-paste" "$test_root/bin/wl-paste"
+
+run_capture() {
+  PATH="$test_root/bin:$PATH" FIXTURE_TYPES="$1" FIXTURE_TEXT="$2" "$capture"
+}
+
+# 1. Text snapshot emits a JSON entry.
+out=$(run_capture 'text/plain' 'hello world')
+echo "$out" | jq -e '.type == "text" and .text == "hello world"' >/dev/null \
+  || fail 'text snapshot must emit a text entry'
+
+# 2. Sensitive MIME type must suppress capture entirely.
+out=$(FIXTURE_TYPES=$'text/plain\nx-kde-passwordManagerHint' FIXTURE_TEXT='secret' \
+  PATH="$test_root/bin:$PATH" "$capture")
+[[ -z $out ]] || fail 'x-kde-passwordManagerHint type must suppress capture'
+
+# 3. CLIPBOARD_STATE=sensitive must suppress capture.
+out=$(FIXTURE_TYPES='text/plain' FIXTURE_TEXT='secret' CLIPBOARD_STATE=sensitive \
+  PATH="$test_root/bin:$PATH" "$capture")
+[[ -z $out ]] || fail 'CLIPBOARD_STATE=sensitive must suppress capture'
+
+# 4. Watch-mode text on stdin emits a JSON entry.
+out=$(printf 'watch text' | PATH="$test_root/bin:$PATH" "$capture" text)
+echo "$out" | jq -e '.type == "text" and .text == "watch text"' >/dev/null \
+  || fail 'watch text must emit a text entry'
+
+# 5. Watch-mode image on stdin saves a file and emits an entry.
+image_out="$test_root/image.png"
+printf '\x89PNG' >"$image_out"
+out=$(cat "$image_out" | PATH="$test_root/bin:$PATH" "$capture" image/png)
+path=$(echo "$out" | jq -r '.path')
+[[ -f $path ]] || fail 'image capture must persist the image file'
+echo "$out" | jq -e '.type == "image" and .mime == "image/png"' >/dev/null \
+  || fail 'image capture must emit an image entry'
+
+# 6. Empty clipboard emits nothing.
+out=$(run_capture '' '')
+[[ -z $out ]] || fail 'empty clipboard must emit nothing'
+
+# 7. Image MIME list routes through wl-paste snapshot.
+FIXTURE_IMAGE='notapng' FIXTURE_TYPES='image/png' FIXTURE_TEXT='' \
+  PATH="$test_root/bin:$PATH" "$capture" >/dev/null
+
+printf 'PASS: Archwarts clipboard sensitive-content capture\n'

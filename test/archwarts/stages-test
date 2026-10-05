@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+test_root=$(mktemp -d)
+trap 'rm -rf "$test_root"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+export HOME="$test_root/home"
+export XDG_CONFIG_HOME="$test_root/config"
+export XDG_DATA_HOME="$test_root/data"
+export XDG_STATE_HOME="$test_root/state"
+export XDG_CACHE_HOME="$test_root/cache"
+export XDG_RUNTIME_DIR="$test_root/run"
+export ARCHWARTS_PACMAN=pacman
+
+cli="$root/bin/archwarts"
+
+for dir in config data state cache run; do
+  [[ -d "$test_root/$dir" ]] || mkdir -p "$test_root/$dir"
+done
+
+if "$cli" install stage desktop-core >/dev/null 2>&1; then
+  fail 'desktop-core must refuse when base has not been applied'
+fi
+
+"$cli" install stage base
+for dir in config data state cache run; do
+  [[ -d "$test_root/$dir/archwarts" ]] \
+    || fail "base stage must create $test_root/$dir/archwarts"
+done
+
+# The transient runtime home may not be creatable outside a graphical session;
+# base staging must tolerate that with a warning instead of failing.
+ARCHWARTS_RUNTIME_HOME="/proc/archwarts-nonwritable" \
+  "$cli" install stage base >/dev/null 2>"$test_root/base-warn.log" \
+  || fail 'base stage must tolerate a non-creatable transient runtime home'
+rg -q 'cannot create transient runtime home' "$test_root/base-warn.log" \
+  || fail 'base stage must warn when the transient runtime home is not creatable'
+
+"$cli" install stage desktop-core
+
+hypr_conf="$test_root/config/archwarts/hypr/hyprland.conf"
+[[ -f $hypr_conf ]] || fail 'desktop-core must stage the Hyprland config'
+[[ $(rg -io 'omarchy' "$hypr_conf" || true) == '' ]] \
+  || fail 'staged Hyprland config must not reference an inherited runtime'
+[[ $(rg -o '@ARCHWARTS_[A-Z_]+@' "$hypr_conf" || true) == '' ]] \
+  || fail 'staged Hyprland config must have all placeholders rendered'
+[[ $(rg 'exec-once' "$hypr_conf") == *"$test_root/config/archwarts/shell"* ]] \
+  || fail 'staged Hyprland config must launch the Archwarts-owned shell'
+rg -q 'archwarts launch-app firefox' "$hypr_conf" \
+  || fail 'Hyprland config must bind the approved browser'
+rg -q 'archwarts shell ipc launcher toggle' "$hypr_conf" \
+  || fail 'Hyprland config must bind the shell launcher'
+
+session="$test_root/data/archwarts/bin/archwarts-session"
+[[ -x $session ]] || fail 'archwarts-session must be staged and executable'
+[[ $(rg -io 'omarchy' "$session" || true) == '' ]] \
+  || fail 'archwarts-session must not reference an inherited runtime'
+[[ $(rg -o 'Hyprland -c' "$session") == 'Hyprland -c' ]] \
+  || fail 'archwarts-session must launch Hyprland with the staged config'
+rg -q 'export ARCHWARTS_CONFIG_HOME' "$session" \
+  || fail 'archwarts-session must export the Archwarts config home'
+rg -q 'runtime/bin' "$session" \
+  || fail 'archwarts-session must add the runtime bin to PATH'
+
+user_session="$test_root/home/.local/bin/archwarts-session"
+[[ -x $user_session ]] || fail 'archwarts-session must be installed to the user PATH'
+
+shell_entry="$test_root/config/archwarts/shell/shell.qml"
+[[ -f $shell_entry ]] || fail 'desktop-core must stage the Archwarts shell entry'
+[[ $(rg -io 'omarchy' "$shell_entry" || true) == '' ]] \
+  || fail 'staged shell must not reference an inherited runtime'
+
+runtime_cli="$test_root/data/archwarts/runtime/bin/archwarts"
+[[ -x $runtime_cli ]] || fail 'desktop-core must stage a self-contained runtime CLI'
+[[ -f "$test_root/data/archwarts/runtime/lib/archwarts/shell.sh" ]] \
+  || fail 'runtime must include the shell library'
+[[ -f "$test_root/data/archwarts/runtime/ARCHWARTS_VERSION" ]] \
+  || fail 'runtime must include the version marker'
+
+palette="$test_root/config/archwarts/theme/palette.conf"
+[[ -f $palette ]] || fail 'desktop-core must stage the default theme palette'
+
+ownership="$test_root/state/archwarts/install/ownership.tsv"
+[[ -f $ownership ]] || fail 'ownership manifest must exist after staging'
+[[ $(rg -c 'desktop-core\t' "$ownership") -ge 20 ]] \
+  || fail 'ownership manifest must record the staged desktop-core files'
+
+stages="$test_root/state/archwarts/install/stages.tsv"
+[[ $(rg -c '^base\t' "$stages") == 1 ]] || fail 'base must be marked applied once'
+[[ $(rg -c '^desktop-core\t' "$stages") == 1 ]] || fail 'desktop-core must be marked applied once'
+
+"$cli" install stage desktop-core
+[[ $(rg -c '^desktop-core\t' "$stages") == 1 ]] \
+  || fail 're-applying desktop-core must remain idempotent'
+
+printf 'foreign content\n' >"$hypr_conf"
+if "$cli" install stage desktop-core >/dev/null 2>&1; then
+  fail 'desktop-core must refuse to overwrite unmanaged modified config'
+fi
+
+# Restore and verify the staged shell has no inherited reference at all.
+printf 'foreign content\n' >"$shell_entry"
+if "$cli" install stage desktop-core >/dev/null 2>&1; then
+  fail 'desktop-core must refuse to overwrite an unmanaged modified shell'
+fi
+
+status=$("$cli" install status)
+[[ $status == *'base'*yes* && $status == *'desktop-core'*yes* ]] \
+  || fail 'install status must report both stages applied'
+
+printf 'PASS: Archwarts staged installer\n'

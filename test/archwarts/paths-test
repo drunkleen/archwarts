@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+command=$root/bin/archwarts
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+assert_contains() {
+  local output=$1 expected=$2
+  [[ $output == *"$expected"* ]] || fail "expected output to contain: $expected"
+}
+
+output=$(env \
+  -u XDG_CONFIG_HOME \
+  -u XDG_DATA_HOME \
+  -u XDG_STATE_HOME \
+  -u XDG_CACHE_HOME \
+  -u XDG_RUNTIME_DIR \
+  HOME=$tmp \
+  "$command" paths)
+assert_contains "$output" "config=$tmp/.config/archwarts"
+assert_contains "$output" "data=$tmp/.local/share/archwarts"
+assert_contains "$output" "state=$tmp/.local/state/archwarts"
+assert_contains "$output" "cache=$tmp/.cache/archwarts"
+assert_contains "$output" "runtime=$tmp/.local/share/archwarts"
+assert_contains "$output" "user_bin=$tmp/.local/bin"
+
+output=$(
+  HOME=$tmp \
+    XDG_CONFIG_HOME=$tmp/xdg-config \
+    XDG_DATA_HOME=$tmp/xdg-data \
+    XDG_STATE_HOME=$tmp/xdg-state \
+    XDG_CACHE_HOME=$tmp/xdg-cache \
+    XDG_RUNTIME_DIR=$tmp/xdg-run \
+    "$command" paths
+)
+assert_contains "$output" "config=$tmp/xdg-config/archwarts"
+assert_contains "$output" "data=$tmp/xdg-data/archwarts"
+assert_contains "$output" "state=$tmp/xdg-state/archwarts"
+assert_contains "$output" "cache=$tmp/xdg-cache/archwarts"
+assert_contains "$output" "run=$tmp/xdg-run/archwarts"
+
+output=$(env \
+  -u XDG_DATA_HOME \
+  -u XDG_STATE_HOME \
+  -u XDG_CACHE_HOME \
+  -u XDG_RUNTIME_DIR \
+  HOME=$tmp \
+  XDG_CONFIG_HOME=relative \
+  "$command" paths)
+assert_contains "$output" "config=$tmp/.config/archwarts"
+
+[[ $($command version) == 0.1.0 ]] || fail 'unexpected version'
+
+doctor_output=$(HOME=$tmp "$command" doctor)
+assert_contains "$doctor_output" 'ok: version file'
+assert_contains "$doctor_output" 'ok: ARCHWARTS_CONFIG_HOME='
+assert_contains "$doctor_output" 'ok: core package manifest'
+
+if HOME=$tmp ARCHWARTS_PATH=relative "$command" doctor >/dev/null 2>&1; then
+  fail 'doctor accepted a relative runtime path'
+fi
+
+if "$command" unknown >/dev/null 2>&1; then
+  fail 'unknown command unexpectedly succeeded'
+fi
+
+package_output=$($command package list core)
+assert_contains "$package_output" 'firefox'
+assert_contains "$package_output" 'dolphin'
+
+package_output=$($command package plan default)
+assert_contains "$package_output" 'bitwarden'
+assert_contains "$package_output" 'gimp'
+
+printf 'PASS: Archwarts XDG path contract\n'

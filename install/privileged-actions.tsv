@@ -1,0 +1,14 @@
+# Machine-wide privileged actions required by the Archwarts desktop.
+# This table is data only: it documents explicit, privileged actions that the
+# plan generator renders. No command in this project executes these actions.
+#
+# kind	name	reason
+enable	NetworkManager.service	Primary network management
+enable	systemd-resolved.service	DNS resolution
+mask	NetworkManager-wait-online.service	Do not block session startup on network wait
+enable	avahi-daemon.service	Local network discovery and sharing
+enable	cups.service	Printing
+enable	docker.socket	On-demand container daemon socket
+enable	power-profiles-daemon.service	Power profiles
+enable	sddm.service	Display manager
+enable	systemd-oomd.service	Memory pressure handling

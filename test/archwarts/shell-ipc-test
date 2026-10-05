@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/../..")
+test_root=$(mktemp -d)
+trap 'rm -rf "$test_root"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+export HOME="$test_root/home"
+export XDG_CONFIG_HOME="$test_root/config"
+export XDG_DATA_HOME="$test_root/data"
+export XDG_STATE_HOME="$test_root/state"
+export XDG_CACHE_HOME="$test_root/cache"
+export XDG_RUNTIME_DIR="$test_root/run"
+for d in home config data state cache run; do mkdir -p "$test_root/$d"; done
+
+cli="$root/bin/archwarts"
+
+"$cli" install stage base >/dev/null
+"$cli" install stage desktop-core >/dev/null
+
+# IPC trigger writing and the shell watching directory.
+"$cli" shell ipc launcher toggle
+ipc_dir="$test_root/run/archwarts/ipc"
+trigger=$(ls "$ipc_dir"/*-launcher-toggle.json 2>/dev/null || true)
+[[ -n $trigger ]] || fail 'ipc trigger file must be written'
+[[ $trigger == *-launcher-toggle.json ]] || fail 'ipc filename must encode target and action'
+payload=$(cat "$trigger")
+[[ $payload == "{}" ]] || fail 'ipc payload must default to {}'
+
+"$cli" shell ipc osd show '{"message":"hello","icon":"x"}'
+trigger2=$(ls "$ipc_dir"/*-osd-show.json 2>/dev/null || true)
+[[ -n $trigger2 ]] || fail 'osd trigger must be written'
+echo '{"message":"hello","icon":"x"}' | jq -e '.message == "hello"' >/dev/null \
+  || fail 'osd payload must be preserved'
+
+# Invalid IPC targets/actions must be rejected (no path traversal).
+if "$cli" shell ipc '../escape' toggle >/dev/null 2>&1; then
+  fail 'ipc must reject targets with path separators'
+fi
+if "$cli" shell ipc 'launcher' 'toggle;rm' >/dev/null 2>&1; then
+  fail 'ipc must reject actions with command characters'
+fi
+
+# shell status before and after staging
+status=$("$cli" shell status)
+[[ $status == *'shell	staged	'* ]] || fail 'shell status must report staged shell'
+[[ $status == *"ipc	$ipc_dir"* ]] || fail 'shell status must report the ipc directory'
+
+# Launch command construction is correct and self-contained.
+source "$root/lib/archwarts/paths.sh"
+archwarts_init_paths
+source "$root/lib/archwarts/shell.sh"
+cmd=$(archwarts_shell_launch_command)
+[[ $cmd == *'quickshell -n -p'*"$test_root/config/archwarts/shell"* ]] \
+  || fail 'launch command must target the staged Archwarts shell'
+[[ $(rg -io 'omarchy' <<<"$cmd" || true) == '' ]] \
+  || fail 'launch command must not reference an inherited runtime'
+
+printf 'PASS: Archwarts shell IPC and launch\n'
